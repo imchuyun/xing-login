@@ -1,0 +1,7 @@
+测试环境：Nginx + PHP7.4 + MySQL5.6
+
+网站运行环境设置为：public
+
+伪静态设置为 Thinkphp规则
+
+访问 域名 进行安装
