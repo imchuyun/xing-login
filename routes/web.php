@@ -20,6 +20,8 @@ $router->any('/connect.php', 'ConnectController@handle');
 $router->any('/connect', 'ConnectController@handle');
 $router->get('/return.php', 'ConnectController@return');
 $router->get('/return', 'ConnectController@return');
+$router->get('/wechat/mp/login', 'ConnectController@wechatMpLoginPage');
+$router->any('/wechat/mp/callback', 'ConnectController@wechatMpCallback');
 $router->any('/storage/uploads/{user}/{file}', function ($user, $file) {
     $filePath = ML_ROOT . '/storage/uploads/' . $user . '/' . $file;
     $basePath = realpath(ML_ROOT . '/storage/uploads');

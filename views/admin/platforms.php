@@ -15,10 +15,10 @@ $platformConfigs = [
     'wx' => [
         'doc_url' => 'https://open.weixin.qq.com/',
         'id_label' => 'AppID',
-        'id_placeholder' => '微信开放平台的应用AppID',
+        'id_placeholder' => '微信开放平台或公众号的AppID',
         'secret_label' => 'AppSecret',
-        'secret_placeholder' => '微信开放平台的应用密钥',
-        'tips' => '前往微信开放平台 → 管理中心 → 网站应用 获取凭证',
+        'secret_placeholder' => '微信开放平台应用密钥或公众号AppSecret',
+        'tips' => '开放平台扫码登录使用微信开放平台网站应用；订阅号登录复用这里填写的公众号AppID和AppSecret，公众号后台服务器地址填写下方提示的回调地址。',
     ],
     'alipay' => [
         'doc_url' => 'https://open.alipay.com/',
@@ -162,6 +162,9 @@ $defaultConfig = [
 <div style="display: grid; gap: 1.5rem;">
     <?php foreach ($platforms as $platform):
         $config = $platformConfigs[$platform['name']] ?? $defaultConfig;
+        $wxScopeConfig = $platform['name'] === 'wx'
+            ? \App\Services\WechatOfficialAccountService::parseScopeConfig($platform['scope'] ?? '')
+            : [];
     ?>
         <div style="padding: 1.5rem; border-bottom: 1px solid var(--border-color);">
             <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.5rem;">
@@ -183,6 +186,14 @@ $defaultConfig = [
                                 onclick="copyText('<?= $baseUrl ?>/oauth/<?= e($platform['name']) ?>/callback')"
                                 title="点击复制"><?= $baseUrl ?>/oauth/<?= e($platform['name']) ?>/callback</code>
                         </div>
+                        <?php if ($platform['name'] === 'wx'): ?>
+                        <div style="display: flex; align-items: center; gap: 0.5rem; margin-top: 0.25rem;">
+                            <span style="font-size: 0.75rem; color: var(--text-muted);">公众号服务器:</span>
+                            <code style="font-size: 0.75rem; background-color: var(--bg-surface-hover); padding: 0.125rem 0.375rem; border-radius: 0.25rem; cursor: pointer;"
+                                onclick="copyText('<?= $baseUrl ?>/wechat/mp/callback')"
+                                title="点击复制"><?= $baseUrl ?>/wechat/mp/callback</code>
+                        </div>
+                        <?php endif; ?>
                     </div>
                 </div>
                 <label class="switch">
@@ -210,6 +221,23 @@ $defaultConfig = [
                         class="form-control"
                         placeholder="<?= $config['id_placeholder'] ?>">
                 </div>
+
+                <?php if ($platform['name'] === 'wx'): ?>
+                <div class="form-group">
+                    <label class="form-label">微信登录方式</label>
+                    <select name="wx_login_mode" class="form-control">
+                        <option value="open_platform" <?= (($wxScopeConfig['login_mode'] ?? 'open_platform') === 'open_platform') ? 'selected' : '' ?>>开放平台扫码登录</option>
+                        <option value="mp_subscribe" <?= (($wxScopeConfig['login_mode'] ?? '') === 'mp_subscribe') ? 'selected' : '' ?>>订阅号验证码登录</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">公众号服务器 Token</label>
+                    <input type="text" name="wechat_mp_token" value="<?= e($wxScopeConfig['mp_token'] ?? '') ?>"
+                        class="form-control"
+                        placeholder="与公众号后台服务器配置 Token 保持一致">
+                </div>
+                <?php endif; ?>
 
                 <?php if (!empty($config['show_scope'])): ?>
                 <div class="form-group">

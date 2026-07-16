@@ -1,6 +1,8 @@
 <?php
 namespace App\Controllers;
 
+use App\Services\WechatOfficialAccountService;
+
 /**
  * 管理控制器
  */
@@ -238,6 +240,8 @@ class AdminController extends BaseController
         $appId = trim($this->input('app_id', ''));
         $appSecret = trim($this->input('app_secret', ''));
         $scope = trim($this->input('scope', ''));
+        $wxLoginMode = trim($this->input('wx_login_mode', ''));
+        $wechatMpToken = trim($this->input('wechat_mp_token', ''));
         $status = (int) $this->input('status', 1);
 
         $platform = $this->db->fetch(
@@ -261,8 +265,10 @@ class AdminController extends BaseController
             $updateData['app_secret'] = encrypt($appSecret);
         }
 
-        // 允许scope为空（用于清除配置）
-        if ($scope !== '' || isset($_POST['scope'])) {
+        if ($platform['name'] === 'wx' && $wxLoginMode !== '') {
+            $updateData['scope'] = WechatOfficialAccountService::buildScopeConfig($wxLoginMode, $wechatMpToken);
+        } elseif ($scope !== '' || isset($_POST['scope'])) {
+            // 允许scope为空（用于清除配置）
             $updateData['scope'] = $scope;
         }
 

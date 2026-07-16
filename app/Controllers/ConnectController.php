@@ -3,6 +3,7 @@ namespace App\Controllers;
 
 use App\Services\OAuthService;
 use App\Services\BillingService;
+use App\Services\WechatOfficialAccountService;
 
 /**
  * 彩虹聚合登录API控制器
@@ -130,6 +131,10 @@ class ConnectController extends BaseController
         
         $logId = $this->db->lastInsertId();
         $internalState = $this->encodeState($type, $logId);
+        if ($type === 'wx' && $this->isWechatMpMode($platformConfig)) {
+            $this->wechatMpLoginResponse($app, $platformConfig, $code);
+        }
+
         $authUrl = $this->buildAuthUrl($type, $platformConfig, $internalState);
         $result = [
             'code' => 0,
@@ -189,10 +194,6 @@ class ConnectController extends BaseController
                 ]);
             }
         }
-        if (empty($log['platform_code'])) {
-            echo json_encode(['code' => 2, 'msg' => '等待授权中'], JSON_UNESCAPED_UNICODE);
-            exit;
-        }
         $platformConfig = $this->db->fetch(
             "SELECT * FROM {$this->db->getPrefix()}platforms WHERE name = ? AND status = 1 LIMIT 1",
             [$log['platform']]
@@ -200,6 +201,14 @@ class ConnectController extends BaseController
         
         if (!$platformConfig) {
             $this->jsonError(-1, 104, '当前登录方式未开启');
+        }
+        if ($log['platform'] === 'wx' && $this->isWechatMpMode($platformConfig)) {
+            echo json_encode(['code' => 2, 'msg' => '等待公众号扫码或验证码确认'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        if (empty($log['platform_code'])) {
+            echo json_encode(['code' => 2, 'msg' => '等待授权中'], JSON_UNESCAPED_UNICODE);
+            exit;
         }
         try {
             $decryptedSecret = decrypt($platformConfig['app_secret']);
@@ -376,6 +385,87 @@ class ConnectController extends BaseController
         header('Location: ' . $callbackUrl);
         exit;
     }
+
+    /**
+     * 公众号订阅号扫码/验证码登录页面
+     */
+    public function wechatMpLoginPage()
+    {
+        $code = strtoupper(trim($this->input('code', '')));
+        $qrcode = trim($this->input('qrcode', ''));
+
+        $this->view('auth/wechat_mp_login', [
+            'code' => $code,
+            'qrcode' => $qrcode,
+            'callbackUrl' => $this->getBaseUrl() . '/wechat/mp/callback',
+        ]);
+    }
+
+    /**
+     * 微信公众号服务器回调
+     */
+    public function wechatMpCallback()
+    {
+        $platformConfig = $this->db->fetch(
+            "SELECT * FROM {$this->db->getPrefix()}platforms WHERE name = ? AND status = 1 LIMIT 1",
+            ['wx']
+        );
+
+        if (!$platformConfig || !$this->isWechatMpMode($platformConfig)) {
+            http_response_code(404);
+            echo 'not found';
+            exit;
+        }
+
+        $scopeConfig = WechatOfficialAccountService::parseScopeConfig($platformConfig['scope'] ?? '');
+        $service = new WechatOfficialAccountService(
+            $platformConfig['app_id'] ?? '',
+            decrypt($platformConfig['app_secret'] ?? ''),
+            $scopeConfig['mp_token'] ?? ''
+        );
+
+        $signature = $this->input('signature', '');
+        $timestamp = $this->input('timestamp', '');
+        $nonce = $this->input('nonce', '');
+        if (!$service->checkSignature($signature, $timestamp, $nonce)) {
+            http_response_code(403);
+            echo 'signature error';
+            exit;
+        }
+
+        if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+            echo $this->input('echostr', '');
+            exit;
+        }
+
+        $message = $service->parseMessage(file_get_contents('php://input'));
+        if (empty($message)) {
+            echo 'success';
+            exit;
+        }
+
+        $fromOpenId = $message['FromUserName'] ?? '';
+        $toUser = $message['ToUserName'] ?? '';
+        $loginCode = $this->extractWechatLoginCode($message);
+
+        if ($fromOpenId === '' || $loginCode === '') {
+            header('Content-Type: application/xml; charset=UTF-8');
+            echo $service->replyText($fromOpenId, $toUser, '请在登录页获取验证码后，发送“登录 验证码”完成登录。');
+            exit;
+        }
+
+        $log = $this->findPendingWechatMpLog($loginCode);
+        if (!$log) {
+            header('Content-Type: application/xml; charset=UTF-8');
+            echo $service->replyText($fromOpenId, $toUser, '验证码不存在或已过期，请回到登录页重新获取。');
+            exit;
+        }
+
+        $result = $this->completeWechatMpLogin($log, $fromOpenId, $platformConfig, $service);
+        header('Content-Type: application/xml; charset=UTF-8');
+        echo $service->replyText($fromOpenId, $toUser, $result['message']);
+        exit;
+    }
     
     /**
      * 获取 BillingService 实例
@@ -388,6 +478,172 @@ class ConnectController extends BaseController
             $this->billingService = new BillingService($this->db);
         }
         return $this->billingService;
+    }
+
+    protected function isWechatMpMode($platformConfig)
+    {
+        if (($platformConfig['name'] ?? 'wx') !== 'wx') {
+            return false;
+        }
+
+        $scopeConfig = WechatOfficialAccountService::parseScopeConfig($platformConfig['scope'] ?? '');
+        return ($scopeConfig['login_mode'] ?? '') === 'mp_subscribe';
+    }
+
+    protected function wechatMpLoginResponse($app, $platformConfig, $internalCode)
+    {
+        $displayCode = substr($internalCode, 0, 8);
+        $scopeConfig = WechatOfficialAccountService::parseScopeConfig($platformConfig['scope'] ?? '');
+        $service = new WechatOfficialAccountService(
+            $platformConfig['app_id'] ?? '',
+            decrypt($platformConfig['app_secret'] ?? ''),
+            $scopeConfig['mp_token'] ?? ''
+        );
+        $qrUrl = $service->createLoginQrCode('MLLOGIN_' . $displayCode);
+        $guideUrl = $this->getBaseUrl() . '/wechat/mp/login?' . http_build_query([
+            'code' => $displayCode,
+            'qrcode' => $qrUrl ?: '',
+        ]);
+
+        echo json_encode([
+            'code' => 0,
+            'msg' => 'success',
+            'type' => 'wx',
+            'mode' => 'mp_subscribe',
+            'url' => $guideUrl,
+            'qrcode' => $qrUrl ?: $guideUrl,
+            'verify_code' => $displayCode,
+            'callback' => $this->getBaseUrl() . '/wechat/mp/callback',
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    protected function extractWechatLoginCode(array $message)
+    {
+        $msgType = strtolower($message['MsgType'] ?? '');
+        if ($msgType === 'event') {
+            $eventKey = (string)($message['EventKey'] ?? '');
+            $eventKey = preg_replace('/^qrscene_/i', '', $eventKey);
+            if (preg_match('/MLLOGIN_([A-Z0-9]{6,32})/i', $eventKey, $matches)) {
+                return strtoupper($matches[1]);
+            }
+        }
+
+        if ($msgType === 'text') {
+            $content = strtoupper(trim((string)($message['Content'] ?? '')));
+            if (preg_match('/([A-Z0-9]{6,32})/', $content, $matches)) {
+                return $matches[1];
+            }
+        }
+
+        return '';
+    }
+
+    protected function findPendingWechatMpLog($displayCode)
+    {
+        return $this->db->fetch(
+            "SELECT * FROM {$this->db->getPrefix()}oauth_logs
+             WHERE type = 'wx' AND platform = 'wx' AND status = 0
+             AND code LIKE ? AND `time` >= ?
+             ORDER BY id DESC LIMIT 1",
+            [strtoupper($displayCode) . '%', date('Y-m-d H:i:s', time() - 600)]
+        );
+    }
+
+    protected function completeWechatMpLogin($log, $openid, $platformConfig, WechatOfficialAccountService $service)
+    {
+        $app = $this->db->fetch(
+            "SELECT * FROM {$this->db->getPrefix()}apps WHERE app_id = ? LIMIT 1",
+            [$log['app_id']]
+        );
+
+        if (!$app) {
+            return ['success' => false, 'message' => '登录应用不存在。'];
+        }
+
+        $billingService = $this->getBillingService();
+        $accessCheck = $billingService->checkAccess(
+            (int)$app['user'],
+            $app['app_id'],
+            'wx',
+            $openid
+        );
+
+        if (!$accessCheck['allowed']) {
+            return ['success' => false, 'message' => $accessCheck['error'] ?? '当前账号无权使用微信登录。'];
+        }
+
+        $wechatUser = $service->getUserInfo($openid);
+        $nickname = $wechatUser['nickname'] ?? '微信用户';
+        $avatar = $wechatUser['headimgurl'] ?? '';
+        $gender = $this->convertGenderToString((int)($wechatUser['sex'] ?? 0));
+        $location = trim(($wechatUser['province'] ?? '') . ' ' . ($wechatUser['city'] ?? ''));
+
+        $existingUser = $this->db->fetch(
+            "SELECT * FROM {$this->db->getPrefix()}oauth_users WHERE app_id = ? AND type = ? AND open_id = ? LIMIT 1",
+            [$app['app_id'], 'wx', $openid]
+        );
+
+        if ($existingUser) {
+            $this->db->query(
+                "UPDATE {$this->db->getPrefix()}oauth_users SET
+                    access_token = ?, nickname = ?, avatar = ?, gender = ?, location = ?,
+                    ip = ?, last_time = NOW() WHERE id = ?",
+                [
+                    '',
+                    $nickname,
+                    $avatar,
+                    $gender,
+                    $location,
+                    $_SERVER['REMOTE_ADDR'] ?? '',
+                    $existingUser['id']
+                ]
+            );
+        } else {
+            $this->db->insert('oauth_users', [
+                'app_id' => $app['app_id'],
+                'user' => $app['user'],
+                'type' => 'wx',
+                'open_id' => $openid,
+                'access_token' => '',
+                'nickname' => $nickname,
+                'avatar' => $avatar,
+                'gender' => $gender,
+                'location' => $location,
+                'ip' => $_SERVER['REMOTE_ADDR'] ?? '',
+                'time' => date('Y-m-d H:i:s'),
+                'last_time' => date('Y-m-d H:i:s'),
+            ]);
+        }
+
+        $this->db->query(
+            "UPDATE {$this->db->getPrefix()}oauth_logs
+             SET platform_code = ?, open_id = ?, ip = ?, status = 1, last_time = NOW()
+             WHERE id = ? AND status = 0",
+            ['wechat_mp', $openid, $_SERVER['REMOTE_ADDR'] ?? '', $log['id']]
+        );
+        $this->updateCallCount($app);
+        $billingService->recordCall(
+            (int)$app['user'],
+            $app['app_id'],
+            'wx',
+            $accessCheck['package_type'] ?? 'free',
+            $accessCheck['package_id'] ?? null,
+            $_SERVER['REMOTE_ADDR'] ?? null
+        );
+
+        return ['success' => true, 'message' => '登录确认成功，请回到网站继续。'];
+    }
+
+    protected function getBaseUrl()
+    {
+        $baseUrl = rtrim(config('site.url'), '/');
+        if ($baseUrl !== '') {
+            return $baseUrl;
+        }
+
+        return (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http')
+            . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost');
     }
     
     /**
