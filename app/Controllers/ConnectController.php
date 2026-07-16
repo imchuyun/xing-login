@@ -552,6 +552,17 @@ class ConnectController extends BaseController
 
     protected function completeWechatMpLogin($log, $openid, $platformConfig, WechatOfficialAccountService $service)
     {
+        if (($log['app_id'] ?? '') === '__site__') {
+            $this->db->query(
+                "UPDATE {$this->db->getPrefix()}oauth_logs
+                 SET platform_code = ?, open_id = ?, ip = ?, status = 1, last_time = NOW()
+                 WHERE id = ? AND status = 0",
+                ['wechat_mp', $openid, $_SERVER['REMOTE_ADDR'] ?? '', $log['id']]
+            );
+
+            return ['success' => true, 'message' => '登录确认成功，请回到网站继续。'];
+        }
+
         $app = $this->db->fetch(
             "SELECT * FROM {$this->db->getPrefix()}apps WHERE app_id = ? LIMIT 1",
             [$log['app_id']]

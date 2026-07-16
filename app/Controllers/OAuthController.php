@@ -7,6 +7,7 @@
 namespace App\Controllers;
 
 use App\Services\OAuthService;
+use App\Services\WechatOfficialAccountService;
 
 class OAuthController extends BaseController
 {
@@ -30,6 +31,12 @@ class OAuthController extends BaseController
             $this->showError('该登录方式未配置');
             return;
         }
+
+        if ($platform === 'wx' && $this->isWechatMpMode($platformConfig)) {
+            $this->startWechatMpSiteLogin($platformConfig);
+            return;
+        }
+
         $settings = $this->getSettings();
         $baseUrl = rtrim($settings['site_url'] ?? '', '/');
         if (empty($baseUrl)) {
@@ -59,6 +66,101 @@ class OAuthController extends BaseController
         } catch (\Exception $e) {
             $this->showError('授权失败: ' . $e->getMessage());
         }
+    }
+
+    /**
+     * 微信公众号订阅号站内登录状态
+     */
+    public function wechatMpStatus()
+    {
+        header('Content-Type: application/json; charset=UTF-8');
+
+        $logId = (int)($_SESSION['wechat_mp_login_log_id'] ?? 0);
+        if ($logId <= 0) {
+            echo json_encode(['code' => -1, 'msg' => '登录会话已失效'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        $log = $this->db->fetch(
+            "SELECT * FROM {$this->db->getPrefix()}oauth_logs WHERE id = ? AND app_id = ? LIMIT 1",
+            [$logId, '__site__']
+        );
+
+        if (!$log) {
+            echo json_encode(['code' => -1, 'msg' => '登录记录不存在'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        if (strtotime($log['time']) < time() - 600) {
+            unset($_SESSION['wechat_mp_login_log_id']);
+            echo json_encode(['code' => -1, 'msg' => '登录已过期，请重新扫码'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        if ((int)$log['status'] === 1 && !empty($log['open_id'])) {
+            echo json_encode(['code' => 0, 'msg' => 'confirmed', 'redirect' => '/wechat/mp/finish'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        echo json_encode(['code' => 2, 'msg' => 'waiting'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    /**
+     * 完成微信公众号订阅号站内登录
+     */
+    public function wechatMpFinish()
+    {
+        $logId = (int)($_SESSION['wechat_mp_login_log_id'] ?? 0);
+        if ($logId <= 0) {
+            $this->showError('登录会话已失效，请重新登录');
+            return;
+        }
+
+        $log = $this->db->fetch(
+            "SELECT * FROM {$this->db->getPrefix()}oauth_logs WHERE id = ? AND app_id = ? LIMIT 1",
+            [$logId, '__site__']
+        );
+
+        if (!$log || (int)$log['status'] !== 1 || empty($log['open_id'])) {
+            $this->showError('公众号登录尚未确认，请重新登录');
+            return;
+        }
+
+        $platformConfig = $this->db->fetch(
+            "SELECT * FROM {$this->db->getPrefix()}platforms WHERE name = ? AND status = 1 LIMIT 1",
+            ['wx']
+        );
+
+        if (!$platformConfig || !$this->isWechatMpMode($platformConfig)) {
+            $this->showError('微信订阅号登录未启用');
+            return;
+        }
+
+        $scopeConfig = WechatOfficialAccountService::parseScopeConfig($platformConfig['scope'] ?? '');
+        $service = new WechatOfficialAccountService(
+            $platformConfig['app_id'] ?? '',
+            decrypt($platformConfig['app_secret'] ?? ''),
+            $scopeConfig['mp_token'] ?? ''
+        );
+        $wechatUser = $service->getUserInfo($log['open_id']);
+        $userInfo = [
+            'platform' => 'wx',
+            'open_id' => $log['open_id'],
+            'union_id' => $wechatUser['unionid'] ?? '',
+            'nickname' => $wechatUser['nickname'] ?? '微信用户',
+            'avatar' => $wechatUser['headimgurl'] ?? '',
+            'email' => '',
+            'raw_data' => $wechatUser,
+        ];
+
+        unset($_SESSION['wechat_mp_login_log_id']);
+        $result = $this->handleOAuthLogin($userInfo);
+        if ($result['success']) {
+            redirect($_SESSION['oauth_redirect'] ?? '/user/dashboard');
+        }
+
+        $this->showError($result['message'] ?? '登录失败');
     }
 
     /**
@@ -292,6 +394,67 @@ class OAuthController extends BaseController
             'platform' => $platform,
             'userInfo' => $userInfo,
         ]);
+    }
+
+    protected function isWechatMpMode($platformConfig)
+    {
+        if (($platformConfig['name'] ?? '') !== 'wx') {
+            return false;
+        }
+
+        $scopeConfig = WechatOfficialAccountService::parseScopeConfig($platformConfig['scope'] ?? '');
+        return ($scopeConfig['login_mode'] ?? '') === 'mp_subscribe';
+    }
+
+    protected function startWechatMpSiteLogin($platformConfig)
+    {
+        $referer = $_GET['redirect'] ?? $_SERVER['HTTP_REFERER'] ?? '/user/dashboard';
+        $_SESSION['oauth_redirect'] = $referer;
+
+        $code = strtoupper(md5(uniqid(mt_rand(), true)));
+        $this->db->insert('oauth_logs', [
+            'code' => $code,
+            'app_id' => '__site__',
+            'user' => 0,
+            'type' => 'wx',
+            'platform' => 'wx',
+            'domain' => $_SERVER['HTTP_HOST'] ?? '',
+            'redirect' => $referer,
+            'state' => 'site_login',
+            'status' => 0,
+            'time' => date('Y-m-d H:i:s'),
+        ]);
+
+        $logId = $this->db->lastInsertId();
+        $_SESSION['wechat_mp_login_log_id'] = $logId;
+
+        $displayCode = substr($code, 0, 8);
+        $scopeConfig = WechatOfficialAccountService::parseScopeConfig($platformConfig['scope'] ?? '');
+        $service = new WechatOfficialAccountService(
+            $platformConfig['app_id'] ?? '',
+            decrypt($platformConfig['app_secret'] ?? ''),
+            $scopeConfig['mp_token'] ?? ''
+        );
+        $qrUrl = $service->createLoginQrCode('MLLOGIN_' . $displayCode);
+
+        $this->view('auth/wechat_mp_login', [
+            'code' => $displayCode,
+            'qrcode' => $qrUrl ?: '',
+            'callbackUrl' => $this->getBaseUrl() . '/wechat/mp/callback',
+            'statusUrl' => '/wechat/mp/status',
+        ]);
+    }
+
+    protected function getBaseUrl()
+    {
+        $settings = $this->getSettings();
+        $baseUrl = rtrim($settings['site_url'] ?? '', '/');
+        if ($baseUrl !== '') {
+            return $baseUrl;
+        }
+
+        return (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http')
+            . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost');
     }
 
     /**

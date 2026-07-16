@@ -25,8 +25,47 @@ ob_start();
             公众号服务器地址：<br>
             <code style="word-break: break-all; color: #111827;"><?= e($callbackUrl) ?></code>
         </div>
+
+        <?php if (!empty($statusUrl)): ?>
+            <div id="loginStatus" style="margin-top: 14px; color: #6b7280; font-size: 13px;">等待公众号确认登录...</div>
+        <?php endif; ?>
     </div>
 </div>
+
+<?php if (!empty($statusUrl)): ?>
+<script>
+    const statusUrl = '<?= e($statusUrl) ?>';
+    const statusText = document.getElementById('loginStatus');
+
+    function checkWechatMpLogin() {
+        fetch(statusUrl, {
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest'
+            }
+        })
+            .then(response => response.json())
+            .then(data => {
+                if (data.code === 0 && data.redirect) {
+                    statusText.textContent = '登录已确认，正在跳转...';
+                    window.location.href = data.redirect;
+                    return;
+                }
+
+                if (data.code === -1) {
+                    statusText.textContent = data.msg || '登录已失效，请返回重新登录';
+                    return;
+                }
+
+                setTimeout(checkWechatMpLogin, 2000);
+            })
+            .catch(() => {
+                setTimeout(checkWechatMpLogin, 3000);
+            });
+    }
+
+    setTimeout(checkWechatMpLogin, 1500);
+</script>
+<?php endif; ?>
 
 <?php $content = ob_get_clean(); ?>
 <?php include ML_ROOT . '/views/layouts/main.php'; ?>

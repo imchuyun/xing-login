@@ -21,6 +21,8 @@ $router->any('/connect', 'ConnectController@handle');
 $router->get('/return.php', 'ConnectController@return');
 $router->get('/return', 'ConnectController@return');
 $router->get('/wechat/mp/login', 'ConnectController@wechatMpLoginPage');
+$router->get('/wechat/mp/status', 'OAuthController@wechatMpStatus');
+$router->get('/wechat/mp/finish', 'OAuthController@wechatMpFinish');
 $router->any('/wechat/mp/callback', 'ConnectController@wechatMpCallback');
 $router->any('/storage/uploads/{user}/{file}', function ($user, $file) {
     $filePath = ML_ROOT . '/storage/uploads/' . $user . '/' . $file;
