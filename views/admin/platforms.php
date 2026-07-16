@@ -18,7 +18,7 @@ $platformConfigs = [
         'id_placeholder' => '微信开放平台或公众号的AppID',
         'secret_label' => 'AppSecret',
         'secret_placeholder' => '微信开放平台应用密钥或公众号AppSecret',
-        'tips' => '开放平台扫码登录使用微信开放平台网站应用；订阅号登录复用这里填写的公众号AppID和AppSecret，公众号后台服务器地址填写下方提示的回调地址。',
+        'tips' => '开放平台扫码登录使用微信开放平台网站应用，Scope 为 snsapi_login；订阅号没有 snsapi_login 权限，请选择“订阅号验证码登录”，并填写公众号 AppID、AppSecret 和服务器 Token。',
     ],
     'alipay' => [
         'doc_url' => 'https://open.alipay.com/',

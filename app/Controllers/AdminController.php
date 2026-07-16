@@ -261,7 +261,7 @@ class AdminController extends BaseController
             $updateData['app_id'] = $appId;
         }
 
-        if (!empty($appSecret)) {
+        if (!empty($appSecret) && $appSecret !== '••••••••••••••••') {
             $updateData['app_secret'] = encrypt($appSecret);
         }
 
